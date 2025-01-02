@@ -1,8 +1,7 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
-use std::mem;
-use std::ops::{Bound, Deref};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -16,9 +15,10 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::SsTable;
 
@@ -403,9 +403,22 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let snaphot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+        let memtable = Box::new(snaphot.memtable.scan(lower, upper));
+        let mut memtables: Vec<Box<MemTableIterator>> = snaphot
+            .imm_memtables
+            .iter()
+            .map(|memtable| Box::new(memtable.scan(lower, upper)))
+            .collect();
+        memtables.insert(0, memtable);
+
+        let merge_iter = MergeIterator::create(memtables);
+        LsmIterator::new(merge_iter).map(FusedIterator::new)
     }
 }
